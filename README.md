@@ -1,6 +1,8 @@
 # CFDVulkan
 A cfd solver implemented with the VulkanAPI for GPU compute
 
+To get more information on special blocks and the GPU implementation see the `Documentation_Group_D.pdf`. More detailed explanations will come in the future...
+
 ## How to run the project
 
 The code supports 3 different ways to run the code
