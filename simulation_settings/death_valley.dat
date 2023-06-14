@@ -1,0 +1,126 @@
+#--------------------------------------------
+#            size of the domain             
+#--------------------------------------------
+xlength      600
+ylength      200
+
+#--------------------------------------------
+#            number of cells
+#--------------------------------------------
+imax        2398
+jmax        798
+
+#--------------------------------------------
+#               time steps
+# dt: time step size
+# t_end: final time
+# tau: safety factor for time step size control
+#--------------------------------------------
+dt           0.000001
+t_end        100.0
+tau          0.5
+
+#--------------------------------------------
+#               output
+# dt_value: time interval for writing files
+#--------------------------------------------
+dt_value     1
+
+#--------------------------------------------
+#               pressure
+# itermax: maximum number of pressure iterations
+# eps: tolerance for pressure iteration (residual < eps)
+# omg: relaxation factor for SOR
+# alpha: upwind differencing factor
+#--------------------------------------------
+itermax      100
+eps          0.01
+omg          1.7
+alpha        0.5
+
+#--------------------------------------------
+#     Reynolds number (here: 1 / nu)
+#--------------------------------------------
+Re          132
+
+#--------------------------------------------
+#        gravity / external forces
+#--------------------------------------------
+GX          0
+GY          -9.8
+
+#--------------------------------------------
+#         initial pressure (In Pascal)
+#--------------------------------------------
+PI          101.325
+
+#--------------------------------------------
+#       initial velocity
+#--------------------------------------------
+UI          6.94444
+VI          0
+
+#--------------------------------------------
+#         initial temperature values (Temperature in Kelvin)
+#--------------------------------------------
+TI          293
+Pr          7
+beta        0.00021
+
+#--------------------------------------------
+#         initial wall temperatures (N E S W), nan indicates insulated wall
+#--------------------------------------------
+WTI         nan nan nan nan
+
+#--------------------------------------------
+#         problem
+#--------------------------------------------
+problem     death_valley
+
+#--------------------------------------------
+#         geometry
+#--------------------------------------------
+geometry    death_valley
+
+#--------------------------------------------
+#         inflow velocitys
+#--------------------------------------------
+UIn         6.94444
+VIn         0
+
+#--------------------------------------------
+#                   Species 
+#Species   |$Name  |$molar_mass |$initial_concentration
+#--------------------------------------------
+Species     CO2     44           0.0004
+Species     O2      32           0.2196
+Species     N2      28           0.78
+
+#--------------------------------------------
+#         multi species inserters
+#         Note: All Species have to be declared beforehand
+#MultiSpeciesInserter | $concentration1,...,$concentrationN | $temperature | $u-vel | $v-vel
+#--------------------------------------------
+MultiSpeciesInserter    .0545  0.21455   .78  500 0 1
+MultiSpeciesInserter    0   1   0   293 0 0
+
+#--------------------------------------------
+#         multi species converter
+#         Note: All Species have to be declared beforehand
+#SpeciesConverter | $reduction1,...,$reductionN | $consum_1_1, ...,$consum_1_n | ... | $consum_n_1, ... , $sonsum_n_n | temperature
+SpeciesConverter    0.000132   0   0   0   0   0   0.6666666   0   0   0   0   0 nan
+
+#--------------------------------------------
+#    gpu usage: if GpuIndex is not negative,
+#    the gpu at index GpuIndex in the list of
+#    available gpus is used, else cpu is used
+#    to simulate
+#--------------------------------------------
+GpuIndex    0
+
+#--------------------------------------------
+#         multi threading
+#--------------------------------------------
+iproc       1
+jproc       1
+

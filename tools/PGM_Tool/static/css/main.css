@@ -1,0 +1,43 @@
+body {
+    font-family: Hack, monospace;
+    font-size: small;
+}
+button {
+    font-family: Hack, monospace;
+}
+.column {
+    float: left;
+    width: 50%;
+}
+
+.input {
+    width: 40px;
+}
+
+input.upload {
+    font-family: Hack, monospace;
+    width: 300px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+/* Clear floats after the columns */
+.row:after {
+    content: "";
+    display: table;
+    clear: both;
+}
+
+.legend {
+    width: 40px;
+}
+
+.dropzone {
+    background: white;
+    border-radius: 5px;
+    border: 2px dashed rgb(0, 135, 247);
+    border-image: none;
+    max-width: 500px;
+    margin-left: auto;
+    margin-right: auto;
+}

@@ -1,0 +1,125 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0) uniform sampler2D velocities;
+layout(binding = 1) uniform sampler2DArray old_species;
+layout(binding = 2, r32f) uniform image2DArray new_species;
+layout(binding = 3) uniform sampler2D temperature;
+layout(binding = 4, r32f) uniform image2D density;
+layout(binding = 5) uniform usampler2D cell_flags;
+layout(binding = 6, std430) buffer sim_context{
+    SimCtx s;
+    float[] species;             //[molarmass0, iconcen0, molarmass1, iconcen1, ...] size fo one species: 2
+};
+layout(binding = 7, std430) buffer multi{
+    int amt_converter;
+    float[] converter;          //<[amt_species*float reduction][amt_species^2*float conversoin ratio matrix][temperature], same for converter1, ...> size of one converter: amt_species + amt_species^2 + 1
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+float linear_c3_plant_consumption(float base,float x){
+	float y=(base/0.003)*x-(base/0.003*0.001); //linear consuption rate
+	return clamp(y,.0,(base/0.003)*0.012-(base/0.003*0.001));
+}
+
+float fire_O2_consumption(float reduction, float concentration){
+	return concentration > 0.16 ? reduction : 0;
+}
+
+void main(){
+    ivec2 tex_size = textureSize(velocities,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x - 1 || gl_GlobalInvocationID.y >= tex_size.y - 1 || gl_GlobalInvocationID.x == 0 || gl_GlobalInvocationID.y == 0) return;
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    float alpha = uintBitsToFloat(s.alpha);
+    float dt = uintBitsToFloat(s.new_dt);
+    int converter_size = s.amt_species + s.amt_species * s.amt_species + 1;
+
+    float spe[MAXSPECIES];
+    float mass_cell[MAXSPECIES];
+    float reduction[MAXSPECIES];
+
+    for(int i = 0; i<s.amt_species; ++i){
+        ivec3 pos = ivec3(cur_pos, i);
+        ivec3 pos_top = ivec3(cur_pos + top, i);
+        ivec3 pos_right = ivec3(cur_pos + right, i);
+        ivec3 pos_bot = ivec3(cur_pos + bot, i);
+        ivec3 pos_left = ivec3(cur_pos + left, i);
+        float t = texelFetch(old_species, pos, 0).x;
+        float t_top = texelFetch(old_species, pos_top, 0).x;
+        float t_right = texelFetch(old_species, pos_right, 0).x;
+        float t_bot = texelFetch(old_species, pos_bot, 0).x;
+        float t_left = texelFetch(old_species, pos_left, 0).x;
+        vec2 vel = texelFetch(velocities, cur_pos, 0).xy;
+        vec2 vel_bot = texelFetch(velocities, cur_pos + bot, 0).xy;
+        vec2 vel_left = texelFetch(velocities, cur_pos + left, 0).xy;
+
+        float duT_dx = (1 / s.dx) * (.5 * vel.x * (t + t_right) - .5 * vel_left.x * (t_left + t))
+	    	+ (alpha / s.dx) * (.5 * abs(vel.x) * (t - t_right) - .5 * abs(vel_left.x) * (t_left - t));
+
+	    float dvT_dy = (1 / s.dy) * (.5 * vel.y * (t + t_top) - .5 * vel_bot.y * (t_bot + t))
+	    	+ (alpha / s.dy) * (.5 * abs(vel.y) * (t - t_top) - .5 * abs(vel_bot.y) * (t_bot - t));
+
+	    float d2T_dx2 = (t_right - 2 * t + t_left) / (s.dx * s.dx);
+
+	    float d2T_dy2 = (t_top - 2 * t + t_bot) / (s.dy * s.dy);
+
+	    float new_t = t + dt * ((1 / (s.Re * s.Pr)) * (d2T_dx2 + d2T_dy2) - duT_dx - dvT_dy);
+
+        float minimum = min(min(min(min(t, t_left), t_right), t_bot), t_top);
+        float maximum = max(max(max(max(t, t_left), t_right), t_bot), t_top);
+        new_t = clamp(new_t, minimum, maximum);
+
+        spe[i] = clamp(new_t, 0, 1);
+    }
+
+    uint cell_flag = texelFetch(cell_flags, cur_pos, 0).x;
+    float t = texelFetch(temperature, cur_pos, 0).x;
+    if(t == 0) t = 293;                         //assuming user has put in celcius instead of kelvin
+    float l = 0;
+    if (cell_flag >= SPECIES_CONVERTER_0){      //having to first convert the species
+        uint c = cell_flag - SPECIES_CONVERTER_0;
+        for (int i = 0; i < s.amt_species; ++i){
+            l += spe[i];
+        }
+        l += s.eps;
+        for (int i = 0; i < s.amt_species; ++i){
+            spe[i] /= l;
+        }
+        //now doing the conversion
+        for(int k = 0; k < s.amt_species; ++k){
+            mass_cell[k] = spe[k] * species[2 * k] * s.PI / (GAS_CONSTANT * t) * s.dx * s.dy;
+            if(converter[c * converter_size + k] > 0){
+				if(s.model==1)reduction[k] = min(mass_cell[k], linear_c3_plant_consumption(converter[c * converter_size + k], spe[k])*s.dx*s.dy*dt);
+				else if(s.model==2)reduction[k] = min(mass_cell[k], fire_O2_consumption(converter[c * converter_size + k],spe[k])*s.dx*s.dy*dt);
+				else reduction[k] = min(mass_cell[k], converter[c * converter_size + k] *s.dx*s.dy*dt);
+			}else reduction[k]=0.0;
+
+            if(reduction[k] >= mass_cell[k]){
+                mass_cell[k] = 0;
+            }else{
+                mass_cell[k] -= reduction[k];
+            }
+        }
+        for(int k = 0; k < s.amt_species; ++k){
+            for(int z = 0; z<s.amt_species;++z){
+                mass_cell[k] += reduction[z] * converter[c * converter_size + s.amt_species + k * s.amt_species + z];
+            }
+            spe[k] = mass_cell[k]/s.dx/s.dy/species[2*k]/s.PI*GAS_CONSTANT*t;
+        }
+        l = 0;
+    }
+    float d = 0;
+    for (int i = 0; i < s.amt_species; ++i){
+        l += spe[i];
+    }
+    l += s.eps;
+    for (int i = 0; i < s.amt_species; ++i){
+        spe[i] /= l;
+        imageStore(new_species, ivec3(cur_pos,i),vec4(spe[i]));
+        d += spe[i] * species[2*i] * s.PI / (GAS_CONSTANT * t);
+    }
+    imageStore(density, cur_pos, vec4(d));
+}

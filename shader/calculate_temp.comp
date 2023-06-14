@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0) uniform sampler2D velocities;
+layout(binding = 1) uniform sampler2D old_temp;
+layout(binding = 2, r32f) uniform image2D new_temp;
+layout(binding = 3, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+void main(){
+    ivec2 tex_size = textureSize(velocities,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x - 1 || gl_GlobalInvocationID.y >= tex_size.y - 1 || gl_GlobalInvocationID.x == 0 || gl_GlobalInvocationID.y == 0) return;
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    float alpha = uintBitsToFloat(s.alpha);
+    float dt = uintBitsToFloat(s.new_dt);
+
+    float t = texelFetch(old_temp, cur_pos, 0).x;
+    float t_top = texelFetch(old_temp, cur_pos + top, 0).x;
+    float t_right = texelFetch(old_temp, cur_pos + right, 0).x;
+    float t_bot = texelFetch(old_temp, cur_pos + bot, 0).x;
+    float t_left = texelFetch(old_temp, cur_pos + left, 0).x;
+    vec2 vel = texelFetch(velocities, cur_pos, 0).xy;
+    vec2 vel_bot = texelFetch(velocities, cur_pos + bot, 0).xy;
+    vec2 vel_left = texelFetch(velocities, cur_pos + left, 0).xy;
+
+    float duT_dx = (1 / s.dx) * (.5 * vel.x * (t + t_right) - .5 * vel_left.x * (t_left + t))
+		+ (alpha / s.dx) * (.5 * abs(vel.x) * (t - t_right) - .5 * abs(vel_left.x) * (t_left - t));
+
+	float dvT_dy = (1 / s.dy) * (.5 * vel.y * (t + t_top) - .5 * vel_bot.y * (t_bot + t))
+		+ (alpha / s.dy) * (.5 * abs(vel.y) * (t - t_top) - .5 * abs(vel_bot.y) * (t_bot - t));
+
+	float d2T_dx2 = (t_right - 2 * t + t_left) / (s.dx * s.dx);
+
+	float d2T_dy2 = (t_top - 2 * t + t_bot) / (s.dy * s.dy);
+
+	float new_t = t + dt * ((1 / (s.Re * s.Pr)) * (d2T_dx2 + d2T_dy2) - duT_dx - dvT_dy);
+
+    float minimum = min(min(min(min(t, t_left), t_right), t_bot), t_top);
+    float maximum = max(max(max(max(t, t_left), t_right), t_bot), t_top);
+    new_t = clamp(new_t, minimum, maximum);
+    imageStore(new_temp, cur_pos,vec4(new_t));
+}

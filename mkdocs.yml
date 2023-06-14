@@ -1,0 +1,29 @@
+site_name: CFD Lab
+
+theme:
+    name: 'material'
+    
+markdown_extensions:
+    - codehilite
+    - attr_list
+    - footnotes
+    - admonition
+
+extra_javascript:
+    - https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/1.6.1/clipboard.min.js
+
+nav:
+    - Home: 'README.md'
+    - Gitlab CI:
+        - 'Creating Documentation': 'Gitlab_CI/docu_ci.md'
+    - Software Setup:
+        - 'Setup VM': 'Setup/1_VM.md'
+        - 'Setup GIT': 'Setup/2_Git.md'
+    - Tools:
+        - 'PGM Tool - Introduction': 'Tools/PGM_Tool/Introduction.md' 
+        - 'PGM Tool - Debugging': 'Tools/PGM_Tool/Debugging.md' 
+        - 'VTK Tools - Overview': 'Tools/VTK_Tools/Tools.md' 
+        - 'VTK Tools - Merge': 'Tools/VTK_Tools/Merge_Tool.md' 
+        - 'VTK Tools - Compare': 'Tools/VTK_Tools/Compare_Tool.md' 
+    - Parallelization:
+        - 'MPI Cart': 'Parallelization/MPI_Cart.md'

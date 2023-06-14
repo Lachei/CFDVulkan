@@ -1,0 +1,626 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0, rg32f) uniform image2D velocities;
+layout(binding = 1, r32f) uniform image2D pressure;
+layout(binding = 2, r32f) uniform image2D temperature;
+layout(binding = 3, r32f) uniform image2DArray species_concentrations;
+layout(binding = 4, r8ui) uniform readonly uimage2D cell_flags;
+layout(binding = 5, r8ui) uniform readonly uimage2D neighbours;
+layout(binding = 6, std430) buffer context{
+    SimCtx s;
+    float[] species;         //[molarmass0, initConcen0, molarmass1, ...]
+};
+layout(binding = 7) buffer multispec{
+    int amt_inserter;
+    float[] inserter;       //[temp0, concentration00, ..., concentration0N, u0, v0, temp1 ...], size of one inserter: amt_species + 3
+};
+layout(binding = 8, std430) buffer multi{
+    int amt_converter;
+    float[] converter;          //<[amt_species*float reduction][amt_species^2*float conversoin ratio matrix][temperature], same for converter1, ...> size of one converter: amt_species + amt_species^2 + 1
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+void main(){
+    ivec2 tex_size = imageSize(velocities);
+    int inserter_size = s.amt_species + 3;
+    if(gl_GlobalInvocationID.x >= tex_size.x || gl_GlobalInvocationID.y >= tex_size.y) return;
+    int converter_size = s.amt_species + s.amt_species * s.amt_species + 1;
+
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    float alpha = uintBitsToFloat(s.alpha);
+    float dt = uintBitsToFloat(s.new_dt);
+    bool temp_set = false;
+    if (cur_pos.y == 0){                //bottom boundary cell
+        float t_new = imageLoad(temperature, cur_pos + ivec2(0,1)).x;
+        if(!isnan(s.WTN)){
+            t_new = 2 * s.WTN - t_new;
+        }
+        imageStore(temperature, cur_pos, vec4(t_new));
+        temp_set = true;
+    }
+    else if (cur_pos.y == tex_size.y - 1){   //top boundary cell
+        float t_new = imageLoad(temperature, cur_pos + ivec2(0,-1)).x;
+        if(!isnan(s.WTS)){
+            t_new = 2 * s.WTS - t_new;
+        }
+        imageStore(temperature, cur_pos, vec4(t_new));
+        temp_set = true;
+    }
+    else if (cur_pos.x == 0){                //left boundary cell
+        float t_new = imageLoad(temperature, cur_pos + ivec2(0,1)).x;
+        if(!isnan(s.WTE)){
+            t_new = 2 * s.WTE - t_new;
+        }
+        imageStore(temperature, cur_pos, vec4(t_new));
+        temp_set = true;
+    }
+    else if (cur_pos.x == tex_size.x - 1){   //right boundary cell
+        float t_new = imageLoad(temperature, cur_pos + ivec2(0,1)).x;
+        if(!isnan(s.WTW)){
+            t_new = 2 * s.WTW - t_new;
+        }
+        imageStore(temperature, cur_pos, vec4(t_new));
+        temp_set = true;
+    }
+
+    uint cell_flag = imageLoad(cell_flags, cur_pos).x;
+    uint n = imageLoad(neighbours, cur_pos).x;
+
+    //-------------------------------------------------------------------------------------------------
+    // velocity and pressure (only the velocity and pressure of the own cell is set!)
+    //-------------------------------------------------------------------------------------------------
+    switch(cell_flag){
+    case NO_SLIP:
+        switch(n){
+        case B_N:{
+            vec2 vel = vec2(0);      
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.x = - vel_top.x;
+            imageStore(velocities, cur_pos, vec4(vel,0,0));
+            
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(p_top));                      //p(i, j) = p(i, j + 1);
+            break;
+        }
+        case B_S:{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vel.x = -vel_bot.x;                                             //u(i,j) = -1 * u(i,j-1);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(p_bot));                     //p(i,j) = p(i,j-1);
+            break;
+        }
+        case B_W:{
+            vec2 vel = vec2(0);
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.y = -vel_left.y;                                            //v(i,j) = -1 * v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0 , 0));
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(p_left));                    // p(i,j) = p(i-1,j);
+            break;
+        }
+        case B_E:{
+            vec2 vel = vec2(0);
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.x = 0;                                                      //u(i,j) = 0;
+            vel.y = -vel_right.y;                                           //v(i,j) = -1 * v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            imageStore(pressure, cur_pos, vec4(p_right));                   //p(i,j) = p(i+1,j);
+            break;
+        }
+        case(B_N+B_E):{
+            imageStore(velocities, cur_pos, vec4(0));                       //u(i, j) = 0; v(i, j) = 0;
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_top)));      //p(i,j) = .5*(p(i,j+1)+p(i+1,j));
+            break;
+        }
+        case(B_S+B_E):{
+            vec2 vel = vec2(0);                                             //u(i, j) = 0;
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.y = -vel_right.y;                                           //v(i,j) = -1*v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));  
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_bot)));      //p(i,j) = .5*(p(i,j-1)+p(i+1,j));
+            break;
+        }
+        case(B_N+B_W):{
+            vec2 vel = vec2(0);                                             //v(i,j) = 0;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.x = -vel_top.x;                                             //u(i,j) = -1*u(i,j+1);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));                 //v(i, j - 1) = -1*v(i-1,j-1);
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_left + p_top)));    //p(i,j)= .5*(p(i,j+1)+p(i-1,j));
+            break;
+        }
+        case(B_S+B_W):{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.x = -vel_bot.x;                                             //u(i,j) = -1*u(i,j-1);
+            vel.y = -vel_left.y;                                            //v(i,j)=-1*v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_bot + p_left)));
+            break;
+        }
+        }
+        break;
+    case FREE_SLIP:
+        switch(n){
+        case B_N:{
+            vec2 vel = vec2(0);      
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.x = vel_top.x;
+            imageStore(velocities, cur_pos, vec4(vel,0,0));
+            
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(p_top));                      //p(i, j) = p(i, j + 1);
+            break;
+        }
+        case B_S:{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vel.x = vel_bot.x;                                             //u(i,j) = -1 * u(i,j-1);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(p_bot));                     //p(i,j) = p(i,j-1);
+            break;
+        }
+        case B_W:{
+            vec2 vel = vec2(0);
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.y = vel_left.y;                                            //v(i,j) = -1 * v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0 , 0));
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(p_left));                    // p(i,j) = p(i-1,j);
+            break;
+        }
+        case B_E:{
+            vec2 vel = vec2(0);
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.x = 0;                                                      //u(i,j) = 0;
+            vel.y = vel_right.y;                                           //v(i,j) = -1 * v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            imageStore(pressure, cur_pos, vec4(p_right));                   //p(i,j) = p(i+1,j);
+            break;
+        }
+        case(B_N+B_E):{
+            imageStore(velocities, cur_pos, vec4(0));                       //u(i, j) = 0; v(i, j) = 0;
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_top)));      //p(i,j) = .5*(p(i,j+1)+p(i+1,j));
+            break;
+        }
+        case(B_S+B_E):{
+            vec2 vel = vec2(0);                                             //u(i, j) = 0;
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.y = vel_right.y;                                           //v(i,j) = -1*v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));  
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_bot)));      //p(i,j) = .5*(p(i,j-1)+p(i+1,j));
+            break;
+        }
+        case(B_N+B_W):{
+            vec2 vel = vec2(0);                                             //v(i,j) = 0;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.x = vel_top.x;                                             //u(i,j) = -1*u(i,j+1);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));                 //v(i, j - 1) = -1*v(i-1,j-1);
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_left + p_top)));    //p(i,j)= .5*(p(i,j+1)+p(i-1,j));
+            break;
+        }
+        case(B_S+B_W):{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.x = vel_bot.x;                                             //u(i,j) = -1*u(i,j-1);
+            vel.y = vel_left.y;                                            //v(i,j)=-1*v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_bot + p_left)));
+            break;
+        }
+        }
+        break;
+    case OUTFLOW:
+        switch(n){
+        case B_N:{
+            vec2 vel = vec2(0);      
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel = vel_top;                                                  //u(i, j) = 1 * u(i, j + 1);v(i,j) = v(i, j + 1);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(p_top));                      //p(i, j) = p(i, j + 1);
+            break;
+        }
+        case B_S:{
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel = vel_bot;                                              //u(i,j) = 1 * u(i,j-1);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(p_bot));                     //p(i,j) = p(i,j-1);
+            break;
+        }
+        case B_W:{
+            vec2 vel = vec2(0);
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel = vel_left;                                            //v(i,j) = 1 * v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0 , 0));
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(p_left));                    // p(i,j) = p(i-1,j);
+            break;
+        }
+        case B_E:{
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            imageStore(velocities, cur_pos, vec4(vel_right, 0, 0));
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            imageStore(pressure, cur_pos, vec4(p_right));                   //p(i,j) = p(i+1,j);
+            break;
+        }
+        case(B_N+B_E):{
+            vec2 vel = vec2(0);
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.x = vel_right.x;
+            vel.y = vel_top.y;
+            imageStore(velocities, cur_pos, vec4(vel,0,0));
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_top)));      //p(i,j) = .5*(p(i,j+1)+p(i+1,j));
+            break;
+        }
+        case(B_S+B_E):{
+            vec2 vel = vec2(0);                                             //u(i, j) = 0;
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.y = vel_bot.y;
+            vel.x = vel_right.x;                                           //v(i,j) = 1*v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));  
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_bot)));      //p(i,j) = .5*(p(i,j-1)+p(i+1,j));
+            break;
+        }
+        case(B_N+B_W):{
+            vec2 vel = vec2(0);                                             //v(i,j) = 0;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.y = vel_top.y;                                             //u(i,j) = 1*u(i,j+1);
+            vel.x = vel_left.x;
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_left + p_top)));    //p(i,j)= .5*(p(i,j+1)+p(i-1,j));
+            break;
+        }
+        case(B_S+B_W):{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.x = vel_bot.x;                                             //u(i,j) = 1*u(i,j-1);
+            vel.y = vel_left.y;                                            //v(i,j) = 1*v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_bot + p_left)));
+            break;
+        }
+        }
+        break;
+    case MULTISPECIES_0:     //multispecies inserter are inflow cells
+    case MULTISPECIES_1:
+    case MULTISPECIES_2:
+    case MULTISPECIES_3:
+    case MULTISPECIES_4:
+    case INFLOW:
+        for(int i = 0; i < s.amt_species; ++i){
+            imageStore(species_concentrations, ivec3(cur_pos,i), vec4(species[i * 2 + 1]));
+        }
+        float u_in = s.UIn, v_in = s.VIn;
+        if(cell_flag>=MULTISPECIES_0 && cell_flag<=MULTISPECIES_4){
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size + s.amt_species + 1;
+            u_in = inserter[base_offset];
+            v_in = inserter[base_offset + 1];
+        }
+        switch(n){
+        case B_N:{
+            vec2 vel = vec2(0);      
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.y = v_in;                                                      //v(i,j) = 0;
+            vel.x = 2 * u_in - vel_top.x;                                         //u(i, j) = 1 * u(i, j + 1);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(p_top));                      //p(i, j) = p(i, j + 1);
+            break;
+        }
+        case B_S:{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vel.x = 2*u_in - vel_bot.x;
+            vel.y = v_in;
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(p_bot));                     //p(i,j) = p(i,j-1);
+            break;
+        }
+        case B_W:{
+            vec2 vel = vec2(0);
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.y = 2 * v_in - vel_left.y;                                            //v(i,j) = 1 * v(i-1,j);
+            vel.x = u_in;
+            imageStore(velocities, cur_pos, vec4(vel, 0 , 0));
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(p_left));                    // p(i,j) = p(i-1,j);
+            break;
+        }
+        case B_E:{
+            vec2 vel = vec2(0);
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.x = u_in;                                                      //u(i,j) = 0;
+            vel.y = 2 * v_in - vel_right.y;                                           //v(i,j) = 1 * v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0, 0));
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            imageStore(pressure, cur_pos, vec4(p_right));                   //p(i,j) = p(i+1,j);
+            break;
+        }
+        case(B_N+B_E):{
+            imageStore(velocities, cur_pos, vec4(u_in,v_in, 0, 0));                       //u(i, j) = 0; v(i, j) = 0;
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_top)));      //p(i,j) = .5*(p(i,j+1)+p(i+1,j));
+            break;
+        }
+        case(B_S+B_E):{
+            vec2 vel = vec2(0);                                             //u(i, j) = 0;
+            vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+            vel.x = u_in;
+            vel.y = 2 * v_in - vel_right.y;                                           //v(i,j) = 1*v(i+1,j);
+            imageStore(velocities, cur_pos, vec4(vel,0,0));  
+            float p_right = imageLoad(pressure, cur_pos + right).x;
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            imageStore(pressure, cur_pos, vec4(.5*(p_right + p_bot)));      //p(i,j) = .5*(p(i,j-1)+p(i+1,j));
+            break;
+        }
+        case(B_N+B_W):{
+            vec2 vel = vec2(0);                                             //v(i,j) = 0;
+            vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+            vel.y = v_in;
+            vel.x = 2* u_in - vel_top.x;                                             //u(i,j) = 1*u(i,j+1);
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));                               //v(i, j - 1) = 1*v(i-1,j-1);
+            float p_top = imageLoad(pressure, cur_pos + top).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_left + p_top)));    //p(i,j)= .5*(p(i,j+1)+p(i-1,j));
+            break;
+        }
+        case(B_S+B_W):{
+            vec2 vel = vec2(0);
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel.x = 2 * u_in - vel_bot.x;                                             //u(i,j) = 1*u(i,j-1);
+            vel.y = 2 * v_in - vel_left.y;                                            //v(i,j) = 1*v(i-1,j);
+            imageStore(velocities, cur_pos, vec4(vel, 0,0));
+            float p_bot = imageLoad(pressure, cur_pos + bot).x;
+            float p_left = imageLoad(pressure, cur_pos + left).x;
+            imageStore(pressure, cur_pos, vec4(.5f * (p_bot + p_left)));
+            break;
+        }
+        }
+        break;
+    default:{   //a fluid cell
+        uint flag_top = imageLoad(cell_flags, cur_pos + top).x;
+        uint flag_right = imageLoad(cell_flags, cur_pos + right).x;
+        vec2 vel = imageLoad(velocities, cur_pos).xy;
+        switch(flag_top){
+        case NO_SLIP:
+        case FREE_SLIP:
+            vel.y = 0;
+            break;
+        case MULTISPECIES_0:
+        case MULTISPECIES_1:
+        case MULTISPECIES_2:
+        case MULTISPECIES_3:
+        case MULTISPECIES_4:
+        case INFLOW:
+            vel.y = v_in;
+            break;
+        case OUTFLOW:
+            vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+            vel = vel_bot;
+            break;
+        }
+        switch(flag_right){
+        case NO_SLIP:
+        case FREE_SLIP:
+            vel.x = 0;
+            break;
+        case MULTISPECIES_0:
+        case MULTISPECIES_1:
+        case MULTISPECIES_2:
+        case MULTISPECIES_3:
+        case MULTISPECIES_4:
+        case INFLOW:
+            vel.x = u_in;
+            break;
+        case OUTFLOW:
+            vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+            vel = vel_left;
+            break;
+        }
+        imageStore(velocities, cur_pos, vec4(vel,0 ,0));
+    }
+    }
+    //-------------------------------------------------------------------------------------------------
+    // temperature (only for non boundary cells done, as they are set already above)
+    //-------------------------------------------------------------------------------------------------
+    if(cur_pos.x > 0 && cur_pos.x < tex_size.x - 1 && cur_pos.y > 0 && cur_pos.y < tex_size.y - 1 && cell_flag < MULTISPECIES_0)
+    switch(n){
+    case B_N: {
+        float t = imageLoad(temperature, cur_pos + top).x;
+        imageStore(temperature, cur_pos, vec4(t));
+        break;
+    }
+    case B_S: {
+        float t = imageLoad(temperature, cur_pos + bot).x;
+        imageStore(temperature, cur_pos, vec4(t));
+        break;
+    }
+    case B_W: {
+        float t = imageLoad(temperature, cur_pos + left).x;
+        imageStore(temperature, cur_pos, vec4(t));
+        break;
+    }
+    case B_E: {
+        float t = imageLoad(temperature, cur_pos + right).x;
+        imageStore(temperature, cur_pos, vec4(t));
+        break;
+    }
+    case (B_N+B_E): {
+        float t1 = imageLoad(temperature, cur_pos + top).x;
+        float t2 = imageLoad(temperature, cur_pos + right).x;
+        imageStore(temperature, cur_pos, vec4(.5f * (t1 + t2)));
+        break;
+    }
+    case (B_N+B_W): {
+        float t1 = imageLoad(temperature, cur_pos + top).x;
+        float t2 = imageLoad(temperature, cur_pos + left).x;
+        imageStore(temperature, cur_pos, vec4(.5f * (t1 + t2)));
+        break;
+    }
+    case (B_S+B_E): {
+        float t1 = imageLoad(temperature, cur_pos + bot).x;
+        float t2 = imageLoad(temperature, cur_pos + right).x;
+        imageStore(temperature, cur_pos, vec4(.5f * (t1 + t2)));
+        break;
+    }
+    case (B_S+B_W): {
+        float t1 = imageLoad(temperature, cur_pos + bot).x;
+        float t2 = imageLoad(temperature, cur_pos + left).x;
+        imageStore(temperature, cur_pos, vec4(.5f * (t1 + t2)));
+        break;
+    }
+    }
+
+    //-------------------------------------------------------------------------------------------------
+    // mutispecies inserter
+    //-------------------------------------------------------------------------------------------------
+    if(cell_flag >= MULTISPECIES_0 && cell_flag <= MULTISPECIES_4){
+        switch (n) {
+        case B_N: {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case B_S: {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case B_W: {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case B_E: {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case(B_N + B_E): {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case(B_S + B_E): {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t =  inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case(B_N + B_W): {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        case(B_S + B_W): {
+            uint base_offset = (cell_flag - MULTISPECIES_0) * inserter_size;
+            float t = inserter[base_offset];
+            imageStore(temperature, cur_pos, vec4(t));
+            for (int sp = 0; sp < s.amt_species; ++sp) {
+                t = inserter[base_offset + 1 + sp];
+                imageStore(species_concentrations, ivec3(cur_pos,sp),vec4(t));
+            }
+            break;
+        }
+        }
+    }
+
+    //-------------------------------------------------------------------------------------------------
+    // mutispecies inserter
+    //-------------------------------------------------------------------------------------------------
+    int tmp_offset = (int(cell_flag) - SPECIES_CONVERTER_0 + 1) * converter_size - 1;
+    if(cell_flag >= SPECIES_CONVERTER_0 && converter[tmp_offset] > 0){
+        float t = 0;
+        if(s.model == 2){       // 2 = Fire
+            float o2con = imageLoad(species_concentrations, ivec3(cur_pos, s.o2index)).x;
+            t = (o2con >= .16f) ? converter[tmp_offset] : -1;
+        }
+        else{
+            t = converter[tmp_offset];
+        }
+        if(t >= 0){
+            imageStore(temperature, cur_pos, vec4(t));
+        }
+    }
+}

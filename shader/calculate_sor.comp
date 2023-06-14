@@ -1,0 +1,151 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0) uniform sampler2D RS;
+layout(binding = 1, r32f) uniform image2D pressure;
+layout(binding = 2) uniform usampler2D cell_flags;
+layout(binding = 3) uniform usampler2D neighbourhood;
+layout(binding = 4, std430) buffer sim_context{
+    SimCtx s;
+};
+layout(push_constant) uniform PushConstants{
+    uint checkerboard_bit;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z = 1) in;
+
+shared float reduction[32];
+float parallel_reduction_sum(float var) {
+	float t = subgroupAdd(var);             //Adding across the subgroup
+	if (subgroupElect()) {
+		reduction[gl_SubgroupID] = t;
+	}
+    barrier();
+	if (gl_LocalInvocationID == uvec3(0,0,0)) {
+        for (int i = 1; i < gl_NumSubgroups; ++i) {
+            t += reduction[i];
+        }
+        reduction[0] = t;
+	}
+    barrier();
+    return reduction[0];
+}
+
+uint parallel_reduction_sum(uint var) {
+	float t = subgroupAdd(float(var));             //Adding across the subgroup
+	if (subgroupElect()) {
+		reduction[gl_SubgroupID] = t;
+	}
+    barrier();
+	if (gl_LocalInvocationID == uvec3(0,0,0)) {
+        for (int i = 1; i < gl_NumSubgroups; ++i) {
+            t += reduction[i];
+        }
+        reduction[0] = t;
+	}
+    barrier();
+    return uint(reduction[0]);
+}
+
+void main(){
+    if(s.prev_sor_eps >= s.sor_eps){
+        ivec2 tex_size = textureSize(RS,0);
+        ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+        cur_pos.x *= 2;
+        cur_pos.x += int(checkerboard_bit) - (cur_pos.y & 1);
+        bool act = cur_pos.x != 0 && cur_pos.y != 0 && cur_pos.x != tex_size.x - 1 && cur_pos.y != tex_size.y - 1;
+        if(cur_pos.x >= tex_size.x || cur_pos.y >= tex_size.y) {
+            if(subgroupElect()){
+                reduction[gl_SubgroupID] = 0;
+            }
+            return;
+        }
+
+        float coeff = s.omg / (2.0f * (1.0/(s.dx * s.dx) + 1.0 / (s.dy * s.dy)));
+        float p = 0;
+        float p_top = 0;
+        float p_right = 0;
+        float p_bot = 0;
+        float p_left = 0;
+        float rs = 0;
+        uint cell_flag = 0;
+
+        p = imageLoad(pressure, cur_pos).x;
+        p_top = imageLoad(pressure, cur_pos + top).x;
+        p_right = imageLoad(pressure, cur_pos + right).x;
+        p_bot = imageLoad(pressure, cur_pos + bot).x;
+        p_left = imageLoad(pressure, cur_pos + left).x;
+        rs = texelFetch(RS, cur_pos, 0).x;
+        cell_flag = texelFetch(cell_flags, cur_pos, 0).x;
+
+        if(act && (cell_flag == FLUID || cell_flag >= SPECIES_CONVERTER_0)){
+            p = (1 - s.omg) * p + coeff * ((p_right + p_left) / (s.dx * s.dx) + (p_top + p_bot) / (s.dy * s.dy) - rs);
+        }
+
+        // residual computation
+        float rloc = 0;
+        uint counter = 0;
+        if(act && (cell_flag == FLUID || cell_flag >= SPECIES_CONVERTER_0)){
+            rloc = ((p_right - 2 * p + p_left) / (s.dx * s.dx) + (p_top - 2 * p + p_bot) / (s.dy * s.dy) - rs) * ((p_right - 2 * p + p_left) / (s.dx * s.dx) + (p_top - 2 * p + p_bot) / (s.dy * s.dy) - rs);
+            counter = 1;
+        }
+        rloc = parallel_reduction_sum(rloc);
+        counter = parallel_reduction_sum(counter);
+        if(gl_LocalInvocationID.xy == ivec2(0,0) && counter > 0){
+            atomicAdd(s.divider, counter);
+            bool go_on = true;
+            uint old_value = 0; //free
+            uint new_value = 1; //locked
+            while(go_on){
+                if(atomicCompSwap(s.lock, old_value, new_value) == old_value){ //lock was free
+                    s.cur_sor_eps += rloc;
+                    atomicCompSwap(s.lock, new_value, old_value);
+                    go_on = false;
+                }
+            }
+        }
+
+        //setting the boundary pressure if necessary
+        if(cell_flag != FLUID && cell_flag < SPECIES_CONVERTER_0){
+            uint n = texelFetch(neighbourhood, cur_pos, 0).x;
+            switch(n){
+            case B_N:{
+                p = p_top;
+                break;
+            }
+            case B_S:{
+                p = p_bot;
+                break;
+            }
+            case B_W:{
+                p = p_left;
+                break;
+            }
+            case B_E:{
+                p = p_right;
+                break;
+            }
+            case(B_N+B_E):{
+                p = .5*(p_right+p_top);
+                break;
+            }
+            case(B_S+B_E):{
+                p = .5*(p_right+p_bot);
+                break;
+            }
+            case(B_N+B_W):{
+                p = .5*(p_left+p_top);
+                break;
+            }
+            case(B_S+B_W):{
+                p = .5*(p_left+p_bot);
+                break;
+            }
+            }
+        }
+        imageStore(pressure, cur_pos, vec4(p));
+    }
+}

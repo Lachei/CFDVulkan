@@ -1,0 +1,41 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0, rg32f) uniform image2D velocities;
+layout(binding = 1) uniform sampler2D fg;
+layout(binding = 2) uniform sampler2D pressure;
+layout(binding = 3) uniform usampler2D cell_flags;
+layout(binding = 4, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+void main(){
+    ivec2 tex_size = textureSize(fg,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x - 1 || gl_GlobalInvocationID.y >= tex_size.y - 1 || gl_GlobalInvocationID.x == 0 || gl_GlobalInvocationID.y == 0) return;
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+
+    uint cell_flag = texelFetch(cell_flags, cur_pos, 0).x;
+    if ( cell_flag == FLUID || cell_flag == OUTFLOW || cell_flag >= SPECIES_CONVERTER_0){
+        uint cell_flag_right = texelFetch(cell_flags, cur_pos + right, 0).x;
+        uint cell_flag_top = texelFetch(cell_flags, cur_pos + top, 0).x;
+
+        vec2 vel = imageLoad(velocities, cur_pos).xy;
+        vec2 h = texelFetch(fg, cur_pos, 0).xy;
+        if(cell_flag_right == FLUID || cell_flag_right == OUTFLOW || cell_flag_right >= SPECIES_CONVERTER_0){
+            float p = texelFetch(pressure, cur_pos, 0).x;
+            float p_right = texelFetch(pressure, cur_pos + right, 0).x;
+            vel.x = h.x - s.dt/ s.dx * (p_right - p);
+        }
+        if(cell_flag_top == FLUID || cell_flag_top == OUTFLOW || cell_flag_top >= SPECIES_CONVERTER_0){
+            float p = texelFetch(pressure, cur_pos, 0).x;
+            float p_top = texelFetch(pressure, cur_pos + top, 0).x;
+            vel.y = h.y - s.dt/ s.dy * (p_top - p);
+        }
+        imageStore(velocities, cur_pos, vec4(vel,0,0));
+    }
+}

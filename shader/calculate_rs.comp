@@ -1,0 +1,27 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0, r32f) uniform image2D rs;
+layout(binding = 1) uniform sampler2D fg;
+layout(binding = 2, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+void main(){
+    ivec2 tex_size = textureSize(fg,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x || gl_GlobalInvocationID.y >= tex_size.y || gl_GlobalInvocationID.x == 0 || gl_GlobalInvocationID.y == 0) return;
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    float dt = uintBitsToFloat(s.new_dt);
+
+    vec2 h = texelFetch(fg, cur_pos, 0).xy;
+    vec2 h_left = texelFetch(fg, cur_pos + left, 0).xy;
+    vec2 h_bot = texelFetch(fg, cur_pos + bot, 0).xy;
+    float re = ((h.x - h_left.x) / s.dx + (h.y - h_bot.y) / s.dy) / dt;
+
+    imageStore(rs, cur_pos, vec4(re));
+}

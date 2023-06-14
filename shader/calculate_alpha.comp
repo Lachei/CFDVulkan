@@ -1,0 +1,49 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0) uniform sampler2D velocities;
+layout(binding = 1, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+shared float reduction[32];
+float parallel_reduction_max(float var) {
+	float t = subgroupMax(var);             //Max across the subgroup
+	if (subgroupElect()) {
+        reduction[gl_SubgroupID] = t;
+	}
+    barrier();
+	if (gl_LocalInvocationID == uvec3(0, 0, 0)) {
+        for (int i = 1; i < gl_NumSubgroups; ++i) {
+            t = max(reduction[i], t);
+        }
+        reduction[0] = t;
+	}
+    barrier();
+    return reduction[0];
+}
+
+void main(){
+    ivec2 tex_size = textureSize(velocities,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x || gl_GlobalInvocationID.y >= tex_size.y){
+        if(subgroupElect()){
+            reduction[gl_SubgroupID] = 0;
+        }
+        return;
+    }
+    float dt = uintBitsToFloat(s.new_dt);
+
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 abs_v = abs(texelFetch(velocities, cur_pos, 0).xy);
+    float m = max(abs_v.x * dt / s.dx, abs_v.y * dt / s.dy) + s.eps;
+    float m_max = parallel_reduction_max(m);
+    if(gl_LocalInvocationID.xy == ivec2(0,0)){
+        uint a = floatBitsToUint(m_max);
+        atomicMax(s.alpha, a);
+    }
+}

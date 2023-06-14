@@ -1,0 +1,38 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = 1,local_size_y = 1,local_size_z=1) in;
+
+void main(){
+    if(gl_GlobalInvocationID.xy == ivec2(0,0) && s.divider > 0){
+        s.prev_sor_eps = sqrt(s.cur_sor_eps / s.divider);
+        }
+    else if (gl_GlobalInvocationID.xy == ivec2(0,0)){
+        s.prev_sor_eps = s.divider;
+        s.patch_x = 0;
+        s.patch_y = 0;
+        s.patch_z = 0;
+    }
+    if(gl_GlobalInvocationID.xy == ivec2(0,0)){
+        s.cur_sor_eps = 0;
+        s.divider = 0;
+        s.sor_counter++;
+        if(s.sor_counter == s.itermax){   //reset prev_sor_eps to not skip the next time we start
+            s.sor_counter = 0;
+            s.prev_sor_eps = s.sor_eps + 1;
+            s.alpha = 0;//floatBitsToUint(+.7f);
+            s.dt = uintBitsToFloat(s.new_dt);
+            s.new_dt = floatBitsToUint(s.t_end);
+            s.patch_x = s.patch_x_origin;
+            s.patch_y = s.patch_y_origin;
+            s.patch_z = s.patch_z_origin;
+        }
+    }
+}

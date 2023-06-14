@@ -1,0 +1,12 @@
+Fluid trap:
+1 Threads: 17.42, 16.4, 16.32, 16.33
+2 Threads: 10.37, 9.68, 10.10, 9.60
+3 Threads: 8.29, 8.36, 8.38, 8.43
+4 Threads: 12.89, 8.19, 8.2, 8.46, 8.03
+6 Threads: >300
+Lid driven cavity(Large):
+1 Threads: 340, 345
+2 Threads: 260, 259
+3 Threads: 290, 271, 250
+4 Threads: 340
+6 Threads: 800

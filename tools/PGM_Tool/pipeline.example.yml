@@ -1,0 +1,28 @@
+stages:
+  - build
+  - test
+
+# this stage installs flask and starts the app
+flask_setup:
+  stage: build
+  image: ubuntu:18.04
+  before_script: 
+    - apt-get update -qq && apt-get install -y -qq python3-pip curl && export LC_ALL=C.UTF-8 && export LANG=C.UTF-8
+  script:
+    - pip3 install flask
+    - export FLASK_APP=app.py
+    - flask run &>/dev/null & # run flask in the background
+    - sleep 20
+     # check if the flask is running on localhost:5000
+    - res=$(curl -s -o /dev/null -I -w "%{http_code}" localhost:5000) && if (( ${res} != 200 )); then exit 1; else exit 0; fi
+  only:
+    - pgm_tool
+
+testing:
+  stage: test
+  image: gitlab.lrz.de:5005/tum-i05/teaching/cfdlabcodeskeleton_solutions/flask_app
+  script:
+    - flask run &>/dev/null &
+    - python3 test/testing.py
+  only:
+    - pgm_tool

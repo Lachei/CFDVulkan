@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>CFD LAB - PGM Tool</title>
+    <!-- JavaScript -->
+    <script src="static/js/jquery.min.js"></script>
+    <script src="static/js/jexcel.js"></script>
+    <script src="static/js/jsuites.js"></script>
+    <!-- CSS -->
+    <link rel="stylesheet" href="static/css/jexcel.css" type="text/css" />
+    <link rel="stylesheet" href="static/css/jsuites.css" type="text/css" />
+    <link rel="stylesheet" href="static/css/main.css" type="text/css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/hack-font@3.3.0/build/web/hack-subset.css">
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.2/dist/FileSaver.min.js"></script>
+
+</head>
+
+<body>
+    <h1>PGM Tool for the CFD Lab Course</h1>
+    <div class="row">
+        <div class="column">
+            <h2>Domain Configuration</h2>
+            <div id="spreadsheet"></div>
+            <br>
+        </div>
+    </div>
+    <div class="row">
+        <div class="column">
+            <h3>Domain Layout</h3>
+            <p>Number of rows <input type="number" class="input" id="rows" name="rows"></p>
+            <p>Number of cols <input type="number" class="input" id="cols" name="cols"></p>
+            <h3>Functionalities</h3>
+            <button id="set_size">
+                <span>Set the grid size</span>
+            </button>
+            <button id="set_fluid">
+                <span>Init the grid with Fluid Cells</span>
+            </button>
+            <button id="download_pgm">
+                <span>Download Config as PGM File</span>
+            </button>
+            <button id="download_csv">
+                <span>Download Config as CSV File</span>
+            </button>
+        </div>
+        <div class="column">
+            <h2>Config Upload</h2>
+            <form action="{{ url_for('start') }}" method="post" enctype="multipart/form-data">
+                <label>Upload your pgm/csv file with this file selector! 
+                    <br>
+                    <input class="input upload" name="upload" type="file" size="50"> 
+                </label>  <br>
+                <button>Upload</button>
+              </form>              
+        </div>
+    </div>
+    <br>
+    <div class="row">
+        <div class="column">
+            <form>
+                <fieldset>
+                    <legend>Legend</legend>
+                    <table id="legend">
+                        <tbody>
+                            <tr>
+                                <th>Name</th>
+                                <th>Color</th>
+                                <th>Explanation</th>
+                            </tr>
+                        </tbody>
+                    </table>
+                </fieldset>
+            </form>
+        </div>
+        <div class="column">
+            <fieldset>
+                <legend>Logging</legend>
+                <div id="logger" class="web_console"></div>
+            </fieldset>
+        </div>
+    </div>
+</body>
+
+
+<script type="module" src="static/js/init.js"></script>
+<script type="module" src="static/js/restore.js"></script>
+
+</html>
+

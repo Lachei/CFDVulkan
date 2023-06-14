@@ -1,0 +1,93 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0, rg32f) uniform readonly image2D velocities;
+layout(binding = 1, rg32f) uniform image2D fg;
+layout(binding = 2) uniform sampler2D density;
+layout(binding = 3) uniform usampler2D cell_flags;
+layout(binding = 4) uniform usampler2D neighbour;
+layout(binding = 5, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+void main(){
+    ivec2 tex_size = textureSize(density,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x || gl_GlobalInvocationID.y >= tex_size.y) return;
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+	float alpha = uintBitsToFloat(s.alpha);
+	float dt = uintBitsToFloat(s.new_dt);
+
+	vec2 vel = imageLoad(velocities, cur_pos).xy;
+	if(gl_GlobalInvocationID.x == 0 || gl_GlobalInvocationID.y == 0 || gl_GlobalInvocationID.x == tex_size.x - 1 || gl_GlobalInvocationID.y == tex_size.y - 1){
+		imageStore(fg, cur_pos, vec4(vel,0,0));
+		return;
+	}
+	vec2 vel_top = imageLoad(velocities, cur_pos + top).xy;
+	vec2 vel_right = imageLoad(velocities, cur_pos + right).xy;
+	vec2 vel_bot = imageLoad(velocities, cur_pos + bot).xy;
+	vec2 vel_left = imageLoad(velocities, cur_pos + left).xy;
+	vec2 vel_bot_right = imageLoad(velocities, cur_pos + bot_right).xy;
+	vec2 vel_top_left = imageLoad(velocities, cur_pos + top_left).xy;
+	float u = vel.x, u_top = vel_top.x, u_right = vel_right.x, u_bot = vel_bot.x, u_left = vel_left.x, u_top_left = vel_top_left.x;
+	float v = vel.y, v_top = vel_top.y, v_right = vel_right.y, v_bot = vel_bot.y, v_left = vel_left.y, v_bot_right = vel_bot_right.y;
+
+	float d = texelFetch(density, cur_pos, 0).x;
+	
+	uint cell_flag = texelFetch(cell_flags, cur_pos, 0).x;
+	uint cell_flag_right = texelFetch(cell_flags, cur_pos + right, 0).x;
+	uint cell_flag_top = texelFetch(cell_flags, cur_pos + top, 0).x;
+	uint n = texelFetch(neighbour, cur_pos, 0).x;
+	uint n_top = texelFetch(neighbour, cur_pos + top, 0).x;
+	uint n_right = texelFetch(neighbour, cur_pos + right, 0).x;
+
+	//calculate f
+    if((cell_flag==FLUID || cell_flag>=SPECIES_CONVERTER_0)&& (cell_flag_right==FLUID || cell_flag_right == OUTFLOW || cell_flag_right >= SPECIES_CONVERTER_0)){
+		float d2u_dx2 = (u_right - 2 * u + u_left) / pow(s.dx, 2);
+		float d2u_dy2 = (u_top - 2 * u + u_bot) / pow(s.dy, 2);
+		float du2_dx = (pow((u + u_right) / 2, 2) - pow((u + u_left) / 2, 2)) / s.dx;
+		float duv_dy = ((u + u_top) * (v + v_right) / 4 - (u_bot + u) * (v_bot + v_bot_right) / 4) / s.dy;
+		float kW = (u + u_left) / 2;
+		float kE = (u + u_right) / 2;
+		float kS = (v + v_bot) / 2;
+		float kN = (v + v_top) / 2;
+		float dc_dx = alpha / (2 * s.dx) * (kE * (u + u_right) - kW * (u_left + u) + abs(kE) * (u-u_right) - abs(kW) * (u_left - u)) + (1 - alpha) * du2_dx;
+		float dc_dy = alpha / (2 * s.dx) * (kN * (u + u_top) - kS * (u_bot + u) + abs(kN) * (u - u_top) - abs(kS) * (u_bot - u)) + (1 - alpha) * duv_dy;
+		vel.x = u + dt * (1 / s.Re * (d2u_dx2 + d2u_dy2) - dc_dx - dc_dy) + dt * d * s.GX * s.dx * s.dy;
+	}
+
+	//calculate g
+	if((cell_flag==FLUID || cell_flag>=SPECIES_CONVERTER_0) && (cell_flag_top == FLUID || cell_flag_top == OUTFLOW)|| cell_flag_top >= SPECIES_CONVERTER_0){
+		float d2v_dx2 = (v_right - 2 * v + v_left) / pow(s.dx, 2);
+		float d2v_dy2 = (v_top - 2 * v + v_bot) / pow(s.dy, 2);
+		float duv_dx = ((v + v_right) * (u + u_top) / 4 - (v_left + v) * (u_left + u_top_left) / 4) / s.dx;
+		float dv2_dy = (pow((v + v_top) / 2, 2) - pow((v + v_bot) / 2, 2)) / s.dy;
+		float kW = (u + u_left) / 2;
+		float kE = (u + u_right) / 2;
+		float kS = (v + v_bot) / 2;
+		float kN = (v + v_top) / 2;
+		float dc_dx = alpha / (2 * s.dx) * (kE * (v + v_right) - kW * (v_left + v) + abs(kE) * (v - v_right) - abs(kW) * (v_left - v)) + (1 - alpha) * duv_dx;
+		float dc_dy = alpha / (2 * s.dx) * (kN * (v + v_top) - kS * (v_bot + v) + abs(kN) * (v - v_top) - abs(kS) * (v_bot - v)) + (1 - alpha) * dv2_dy;
+		vel.y = v + dt * (1 / s.Re * (d2v_dx2 + d2v_dy2) - dc_dy - dc_dx) + dt * d * s.GY * s.dx * s.dy;
+	}
+
+	//set boundary cells
+	if(n == B_N){
+		vel.y = v;
+	}
+	if(n == B_E){
+		vel.x = u;
+	}
+	if(n_top == B_S){
+		vel.y = v;
+	}
+	if(n_right == B_W){
+		vel.x = u;
+	}
+
+	imageStore(fg, cur_pos, vec4(vel, 0,0));
+}

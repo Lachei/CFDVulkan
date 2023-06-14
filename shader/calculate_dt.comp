@@ -1,0 +1,51 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "structures.h"
+
+layout(binding = 0) uniform sampler2D velocities;
+layout(binding = 1, std430) buffer sim_context{
+    SimCtx s;
+};
+
+layout (local_size_x = LOCAL_SIZE_X,local_size_y = LOCAL_SIZE_Y,local_size_z=1) in;
+
+shared float reduction[32];
+float parallel_reduction_min(float var) {
+	float t = subgroupMin(var);             //Min across the subgroup
+	if (subgroupElect()) {
+        reduction[gl_SubgroupID] = t;
+	}
+    barrier();
+	if (gl_LocalInvocationID == uvec3(0, 0, 0)) {
+        for (int i = 1; i < gl_NumSubgroups; ++i) {
+            t = min(reduction[i],t);
+        }
+        reduction[0] = t;
+	}
+    barrier();
+    return reduction[0];
+}
+
+void main(){
+    ivec2 tex_size = textureSize(velocities,0);
+    if(gl_GlobalInvocationID.x >= tex_size.x || gl_GlobalInvocationID.y >= tex_size.y) {
+        if(subgroupElect()){
+            reduction[gl_SubgroupID] = 1.0/0;
+        }
+        return;
+    }
+
+    ivec2 cur_pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 abs_v = abs(texelFetch(velocities, cur_pos, 0).xy);
+    float dt_t = s.tau * min(min(min(
+                        .5*(s.Pr * s.Re * s.dx * s.dx * s.dy * s.dy)/(s.dx * s.dx + s.dy * s.dy),
+                        .5*(s.dx * s.dx * s.dy * s.dy * s.Re)/(s.dx * s.dx + s.dy * s.dy)),
+                        s.dx/abs_v.x),
+                        s.dy/abs_v.y);
+    float dt_min = parallel_reduction_min(dt_t);
+    if(gl_LocalInvocationID.xy == ivec2(0,0)){
+        atomicMin(s.new_dt, floatBitsToUint(dt_min));
+    }
+}
